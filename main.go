@@ -1,48 +1,30 @@
 package main
 
 import (
-	"bufio"
-	"fmt"
-	"golang.org/x/net/html/charset"
-	"golang.org/x/text/encoding"
-	"golang.org/x/text/encoding/unicode"
-	"golang.org/x/text/transform"
-	"io"
-	"net/http"
+	"github.com/chromedp/chromedp"
+
+	"context"
+	"log"
+	"time"
 )
 
 func main() {
-	url := "https://www.thepaper.cn/"
-	body, err := Fetch(url)
-	if err != nil {
-		fmt.Printf("read content failed:%v", err)
-		return
-	}
-	fmt.Println(string(body))
+	ctx, cancel := chromedp.NewContext(context.Background())
+	defer cancel()
 
-}
+	ctx, cancel = context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
 
-func Fetch(url string) ([]byte, error) {
-	resp, err := http.Get(url)
+	var example string
+	err := chromedp.Run(ctx,
+		chromedp.Navigate(`https://pkg.go.dev/time`),
+		chromedp.WaitVisible(`body > footer`),
+		chromedp.Click(`#example-After`, chromedp.NodeVisible),
+		chromedp.Value(`#example-After textarea`, &example),
+	)
 	if err != nil {
-		panic(err)
+		log.Fatal(err)
 	}
-	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		fmt.Printf("Error status code:%d", resp.StatusCode)
-	}
-	bodyReader := bufio.NewReader(resp.Body)
-	e := DeterminEncoding(bodyReader)
-	utf8Reader := transform.NewReader(bodyReader, e.NewDecoder())
-	return io.ReadAll(utf8Reader)
-}
-func DeterminEncoding(r *bufio.Reader) encoding.Encoding {
-	bytes, err := r.Peek(1024)
-	if err != nil {
-		fmt.Printf("fetch error :%v", err)
-		return unicode.UTF8
-	}
-	e, _, _ := charset.DetermineEncoding(bytes, "")
-	return e
+	log.Printf("Go's time.After example:\\n%s", example)
 }
