@@ -1,30 +1,29 @@
 package main
 
 import (
-	"github.com/chromedp/chromedp"
-
-	"context"
-	"log"
+	"crawler/collect"
+	"crawler/proxy"
+	"fmt"
 	"time"
 )
 
 func main() {
-	ctx, cancel := chromedp.NewContext(context.Background())
-	defer cancel()
-
-	ctx, cancel = context.WithTimeout(ctx, 15*time.Second)
-	defer cancel()
-
-	var example string
-	err := chromedp.Run(ctx,
-		chromedp.Navigate(`https://pkg.go.dev/time`),
-		chromedp.WaitVisible(`body > footer`),
-		chromedp.Click(`#example-After`, chromedp.NodeVisible),
-		chromedp.Value(`#example-After textarea`, &example),
-	)
+	proxyURLs := []string{"http://127.0.0.1:7890", "http://127.0.0.23:7890"}
+	p, err := proxy.RoundRobinProxySwitcher(proxyURLs...)
 	if err != nil {
-		log.Fatal(err)
+		fmt.Println("RoundRobinProxySwitcher failed")
+	}
+	url := "https://www.baidu.com"
+	var f collect.Fetcher = collect.BrowserFetch{
+		Timeout: 3000 * time.Millisecond,
+		Proxy:   p,
 	}
 
-	log.Printf("Go's time.After example:\\n%s", example)
+	body, err := f.Get(url)
+
+	if err != nil {
+		fmt.Printf("read content failed:%v\n", err)
+		return
+	}
+	fmt.Println(string(body))
 }

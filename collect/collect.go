@@ -2,6 +2,7 @@ package collect
 
 import (
 	"bufio"
+	"crawler/proxy"
 	"fmt"
 	"golang.org/x/net/html/charset"
 	"golang.org/x/text/encoding"
@@ -9,6 +10,7 @@ import (
 	"golang.org/x/text/transform"
 	"io"
 	"net/http"
+	"time"
 )
 
 type Fetcher interface {
@@ -39,10 +41,19 @@ func (BaseFetch) Get(url string) ([]byte, error) {
 }
 
 type BrowserFetch struct {
+	Timeout time.Duration
+	Proxy   proxy.ProxyFunc
 }
 
 func (b BrowserFetch) Get(url string) ([]byte, error) {
-	client := &http.Client{}
+	client := &http.Client{
+		Timeout: b.Timeout,
+	}
+	if b.Proxy != nil {
+		transport := http.DefaultTransport.(*http.Transport)
+		transport.Proxy = b.Proxy
+		client.Transport = transport
+	}
 
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
@@ -57,15 +68,19 @@ func (b BrowserFetch) Get(url string) ([]byte, error) {
 	bodyReader := bufio.NewReader(resp.Body)
 	e := DeterminEncoding(bodyReader)
 	reader := transform.NewReader(bodyReader, e.NewDecoder())
+
 	return io.ReadAll(reader)
 }
 
 func DeterminEncoding(r *bufio.Reader) encoding.Encoding {
 	bytes, err := r.Peek(1024)
+
 	if err != nil {
 		fmt.Printf("fetch error :%v", err)
 		return unicode.UTF8
 	}
+
 	e, _, _ := charset.DetermineEncoding(bytes, "")
+
 	return e
 }
