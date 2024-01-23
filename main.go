@@ -1,29 +1,15 @@
 package main
 
 import (
-	"crawler/collect"
-	"crawler/proxy"
-	"fmt"
-	"time"
+	"crawler/log"
+	"go.uber.org/zap/zapcore"
 )
 
 func main() {
-	proxyURLs := []string{"http://127.0.0.1:7890", "http://127.0.0.23:7890"}
-	p, err := proxy.RoundRobinProxySwitcher(proxyURLs...)
-	if err != nil {
-		fmt.Println("RoundRobinProxySwitcher failed")
-	}
-	url := "https://www.baidu.com"
-	var f collect.Fetcher = collect.BrowserFetch{
-		Timeout: 3000 * time.Millisecond,
-		Proxy:   p,
-	}
+	plugin, c := log.NewFilePlugin("./log.txt", zapcore.InfoLevel)
+	defer c.Close()
 
-	body, err := f.Get(url)
-
-	if err != nil {
-		fmt.Printf("read content failed:%v\n", err)
-		return
-	}
-	fmt.Println(string(body))
+	logger := log.NewLogger(plugin)
+	logger.Info("log init end")
+	logger.Error("log error")
 }

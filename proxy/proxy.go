@@ -22,6 +22,7 @@ func RoundRobinProxySwitcher(ProxyUrls ...string) (ProxyFunc, error) {
 		}
 		urls[i] = parsedU
 	}
+
 	return (&roundRobinSwitcher{urls, 0}).GetProxy, nil
 }
 
