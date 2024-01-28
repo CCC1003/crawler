@@ -3,78 +3,143 @@ package engine
 import (
 	"crawler/collect"
 	"go.uber.org/zap"
+	"sync"
 )
 
-type Schedule struct {
-	requestCh chan *collect.Request
-	workerCh  chan *collect.Request
-	out       chan collect.ParseResult
+type Crawler struct {
+	out         chan collect.ParseResult
+	Visited     map[string]bool
+	VisitedLock sync.Mutex
+	failures    map[string]*collect.Request
+	failureLock sync.Mutex
 	options
 }
 
-type Config struct {
-	WorkCount int
-	Fetcher   collect.Fetcher
-	Logger    *zap.Logger
-	Seeds     []*collect.Request
+type Scheduler interface {
+	Schedule()
+	Push(...*collect.Request)
+	Pull() *collect.Request
 }
 
-func NewSchedule(opts ...Option) *Schedule {
+type Schedule struct {
+	requestCh   chan *collect.Request
+	workerCh    chan *collect.Request
+	priReqQueue []*collect.Request
+	reqQueue    []*collect.Request
+	Logger      *zap.Logger
+}
+
+func NewEngine(opts ...Option) *Crawler {
 	options := defaultOptions
 	for _, opt := range opts {
 		opt(&options)
 	}
+	e := &Crawler{}
+	e.Visited = make(map[string]bool, 100)
+	e.out = make(chan collect.ParseResult)
+	e.failures = make(map[string]*collect.Request)
+	e.options = options
+	return e
+}
+
+func NewSchedule() *Schedule {
 	s := &Schedule{}
-	s.options = options
+	requestCh := make(chan *collect.Request)
+	workerCh := make(chan *collect.Request)
+
+	s.requestCh = requestCh
+	s.workerCh = workerCh
+
 	return s
 }
 
-func (s *Schedule) Run() {
-	requestCh := make(chan *collect.Request)
-	workerCh := make(chan *collect.Request)
-	out := make(chan collect.ParseResult)
-	s.requestCh = requestCh
-	s.workerCh = workerCh
-	s.out = out
-
-	go s.Schedule()
-	for i := 0; i < s.WorkCount; i++ {
-		go s.CreateWork()
+func (e *Crawler) Run() {
+	go e.Schedule()
+	for i := 0; i < e.WorkCount; i++ {
+		go e.CreateWork()
 	}
-	s.HandleResult()
+	e.HandleResult()
+}
+
+func (s *Schedule) Push(reqs ...*collect.Request) {
+	for _, req := range reqs {
+		s.requestCh <- req
+	}
+}
+
+func (s *Schedule) Pull() *collect.Request {
+	r := <-s.workerCh
+	return r
+}
+
+func (s *Schedule) Output() *collect.Request {
+	r := <-s.workerCh
+	return r
 }
 
 func (s *Schedule) Schedule() {
-	var reqQueue = s.Seeds
-	go func() {
-		for {
-			var req *collect.Request
-			var ch chan *collect.Request
-
-			if len(reqQueue) > 0 {
-				req = reqQueue[0]
-				ch = s.workerCh
-			}
-			select {
-			case r := <-s.requestCh:
-				reqQueue = append(reqQueue, r)
-
-			case ch <- req:
-				reqQueue = reqQueue[1:]
-			}
+	var req *collect.Request
+	var ch chan *collect.Request
+	for {
+		if req == nil && len(s.priReqQueue) > 0 {
+			req = s.priReqQueue[0]
+			s.priReqQueue = s.priReqQueue[1:]
+			ch = s.workerCh
 		}
-	}()
+		if req == nil && len(s.reqQueue) > 0 {
+			req = s.reqQueue[0]
+			s.reqQueue = s.reqQueue[1:]
+			ch = s.workerCh
+		}
+		select {
+		case r := <-s.requestCh:
+			if r.Priority > 0 {
+				s.priReqQueue = append(s.priReqQueue, r)
+			} else {
+				s.reqQueue = append(s.reqQueue, r)
+			}
+		case ch <- req:
+			req = nil
+			ch = nil
+		}
+	}
 }
 
-func (s *Schedule) CreateWork() {
+func (e *Crawler) Schedule() {
+	var reqs []*collect.Request
+	for _, seed := range e.Seeds {
+		seed.RootReq.Task = seed
+		seed.RootReq.Url = seed.Url
+		reqs = append(reqs, seed.RootReq)
+	}
+	go e.scheduler.Schedule()
+	go e.scheduler.Push(reqs...)
+}
+
+func (s *Crawler) CreateWork() {
 	for {
-		r := <-s.workerCh
+		r := s.scheduler.Pull()
+		if err := r.Check(); err != nil {
+			s.Logger.Error("check failed",
+				zap.Error(err),
+			)
+			continue
+		}
+		if !r.Task.Reload && s.HasVisited(r) {
+			s.Logger.Debug("request has visited",
+				zap.String("url:", r.Url),
+			)
+			continue
+		}
+		s.StoreVisited(r)
+
 		body, err := s.Fetcher.Get(r)
 		if len(body) < 6000 {
 			s.Logger.Error("can't fetch ",
 				zap.Int("length", len(body)),
 				zap.String("url", r.Url),
 			)
+			continue
 		}
 		if err != nil {
 			s.Logger.Error("can't fetch ",
@@ -84,21 +149,56 @@ func (s *Schedule) CreateWork() {
 			continue
 		}
 		result := r.ParseFunc(body, r)
+
+		if len(result.Requests) > 0 {
+			go s.scheduler.Push(result.Requests...)
+		}
+
 		s.out <- result
 	}
 }
 
-func (s *Schedule) HandleResult() {
+func (s *Crawler) HandleResult() {
 	for {
 		select {
 		case result := <-s.out:
-			for _, req := range result.Requests {
-				s.requestCh <- req
-			}
 			for _, item := range result.Items {
 				// todo: store
 				s.Logger.Sugar().Info("get result: ", item)
 			}
 		}
 	}
+}
+
+func (e *Crawler) HasVisited(r *collect.Request) bool {
+	e.VisitedLock.Lock()
+	defer e.VisitedLock.Unlock()
+	unique := r.Unique()
+	return e.Visited[unique]
+}
+
+func (e *Crawler) StoreVisited(reqs ...*collect.Request) {
+	e.VisitedLock.Lock()
+	defer e.VisitedLock.Unlock()
+	for _, r := range reqs {
+		unique := r.Unique()
+		e.Visited[unique] = true
+	}
+}
+
+func (e *Crawler) SetFailure(req *collect.Request) {
+	if !req.Task.Reload {
+		e.VisitedLock.Lock()
+		unique := req.Unique()
+		delete(e.Visited, unique)
+		e.VisitedLock.Unlock()
+	}
+	e.failureLock.Lock()
+	defer e.failureLock.Unlock()
+	if _, ok := e.failures[req.Unique()]; !ok {
+		//首次失败时，再重新执行一次
+		e.failures[req.Unique()] = req
+		e.scheduler.Push(req)
+	}
+	//todo:失败2次，加载到失败队列中
 }
