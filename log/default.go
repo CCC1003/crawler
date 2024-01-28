@@ -18,7 +18,7 @@ func DefaultEncoder() zapcore.Encoder {
 	return zapcore.NewJSONEncoder(DefaultEncoderConfig())
 }
 
-// 1.不会自动清理backup 2.每200mb压缩一次，不按时间rotate
+// DefaultLumberjackLogger 1.不会自动清理backup 2.每200mb压缩一次，不按时间rotate
 func DefaultLumberjackLogger() *lumberjack.Logger {
 	return &lumberjack.Logger{
 		MaxSize:   200,
