@@ -2,9 +2,28 @@ package engine
 
 import (
 	"crawler/collect"
+	"crawler/parse/douban"
 	"go.uber.org/zap"
 	"sync"
 )
+
+func init() {
+	Store.Add(douban.DoubangroupTask)
+}
+func (c *CrawlerStore) Add(task *collect.Task) {
+	c.hash[task.Name] = task
+	c.list = append(c.list, task)
+}
+
+var Store = &CrawlerStore{
+	list: []*collect.Task{},
+	hash: map[string]*collect.Task{},
+}
+
+type CrawlerStore struct {
+	list []*collect.Task
+	hash map[string]*collect.Task
+}
 
 type Crawler struct {
 	out         chan collect.ParseResult
@@ -108,9 +127,13 @@ func (s *Schedule) Schedule() {
 func (e *Crawler) Schedule() {
 	var reqs []*collect.Request
 	for _, seed := range e.Seeds {
-		seed.RootReq.Task = seed
-		seed.RootReq.Url = seed.Url
-		reqs = append(reqs, seed.RootReq)
+		task := Store.hash[seed.Name]
+		task.Fetcher = seed.Fetcher
+		rootreqs := task.Rule.Root()
+		for _, req := range rootreqs {
+			req.Task = task
+		}
+		reqs = append(reqs, rootreqs...)
 	}
 	go e.scheduler.Schedule()
 	go e.scheduler.Push(reqs...)
@@ -118,37 +141,43 @@ func (e *Crawler) Schedule() {
 
 func (s *Crawler) CreateWork() {
 	for {
-		r := s.scheduler.Pull()
-		if err := r.Check(); err != nil {
+		req := s.scheduler.Pull()
+		if err := req.Check(); err != nil {
 			s.Logger.Error("check failed",
 				zap.Error(err),
 			)
 			continue
 		}
-		if !r.Task.Reload && s.HasVisited(r) {
+		if !req.Task.Reload && s.HasVisited(req) {
 			s.Logger.Debug("request has visited",
-				zap.String("url:", r.Url),
+				zap.String("url:", req.Url),
 			)
 			continue
 		}
-		s.StoreVisited(r)
+		s.StoreVisited(req)
 
-		body, err := s.Fetcher.Get(r)
+		body, err := s.Fetcher.Get(req)
 		if len(body) < 6000 {
 			s.Logger.Error("can't fetch ",
 				zap.Int("length", len(body)),
-				zap.String("url", r.Url),
+				zap.String("url", req.Url),
 			)
+			s.SetFailure(req)
 			continue
 		}
 		if err != nil {
 			s.Logger.Error("can't fetch ",
 				zap.Error(err),
-				zap.String("url", r.Url),
+				zap.String("url", req.Url),
 			)
+			s.SetFailure(req)
 			continue
 		}
-		result := r.ParseFunc(body, r)
+		rule := req.Task.Rule.Trunk[req.RuleName]
+		result := rule.ParseFunc(&collect.Context{
+			body,
+			req,
+		})
 
 		if len(result.Requests) > 0 {
 			go s.scheduler.Push(result.Requests...)

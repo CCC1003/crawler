@@ -4,9 +4,7 @@ import (
 	"crawler/collect"
 	"crawler/engine"
 	"crawler/log"
-	"crawler/parse/douban"
 	"crawler/proxy"
-	"fmt"
 	"go.uber.org/zap/zapcore"
 	"time"
 )
@@ -23,37 +21,24 @@ func main() {
 	if err != nil {
 		logger.Error("RoundRobinProxySwitcher failed")
 	}
-
+	//Get
 	var f collect.Fetcher = &collect.BrowserFetch{
 		Timeout: 30000 * time.Millisecond,
 		Logger:  logger,
 		Proxy:   p,
 	}
 
-	cookie := "bid=znKnt-7lWzE; _ga=GA1.1.1024234719.1704808192; _ga_RXNMP372GL=GS1.1.1704808192.1.0.1704808200.52.0.0; viewed=\"1007305\"; ll=\"108303\"; _pk_id.100001.8cb4=75ab89c34ff29dff.1706082828.; douban-fav-remind=1; ct=y; _pk_ref.100001.8cb4=%5B%22%22%2C%22%22%2C1706234447%2C%22https%3A%2F%2Fwww.baidu.com%2Flink%3Furl%3DEMf3oP-2srnkNkXMhP79IWiuKe7MPfsgf27b7QMRlJzAuaKR8rHfIpD8P7V1Nybs%26wd%3D%26eqid%3Dd03af640009885e40000000365b31248%22%5D; _pk_ses.100001.8cb4=1; __utma=30149280.1024234719.1704808192.1706144791.1706234448.10; __utmc=30149280; __utmz=30149280.1706234448.10.3.utmcsr=baidu|utmccn=(organic)|utmcmd=organic; ap_v=0,6.0; dbcl2=\"277697100:TT+ck9rXL/M\"; ck=83M2; frodotk_db=\"6acfa8ca95fff80d406efa5fc1ffe827\"; push_noty_num=0; push_doumail_num=0; __utmt=1; __utmv=30149280.27769; __utmb=30149280.17.5.1706235397784"
-
-	var workList = make([]*collect.Task, 0, 1000)
-	for i := 0; i < 25; i += 25 {
-		str := fmt.Sprintf("https://www.douban.com/group/szsh/discussion?start=%d", i)
-		workList = append(workList, &collect.Task{
-			Url:      str,
-			WaitTime: 1 * time.Second,
-			Cookie:   cookie,
-			MaxDepth: 5,
-			Fetcher:  f,
-			RootReq: &collect.Request{
-				Priority:  1,
-				Method:    "GET",
-				ParseFunc: douban.ParseURL,
-			},
-		})
-	}
+	seeds := make([]*collect.Task, 0, 1000)
+	seeds = append(seeds, &collect.Task{
+		Name:    "find_douban_sun_room",
+		Fetcher: f,
+	})
 
 	s := engine.NewEngine(
 		engine.WithFetcher(f),
 		engine.WithLogger(logger),
 		engine.WithWorkCount(5),
-		engine.WithSeeds(workList),
+		engine.WithSeeds(seeds),
 		engine.WithScheduler(engine.NewSchedule()),
 	)
 
