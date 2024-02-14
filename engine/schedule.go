@@ -2,26 +2,26 @@ package engine
 
 import (
 	"crawler/collect"
-	"crawler/parse/douban"
+	"crawler/collector"
+	"crawler/parse/doubanbook"
+	"crawler/parse/doubangroup"
 	"github.com/robertkrimen/otto"
 	"go.uber.org/zap"
 	"sync"
 )
 
 func init() {
-	Store.Add(douban.DoubangroupTask)
-	Store.AddJSTask(douban.DoubangroupJSTask)
+	Store.Add(doubangroup.DoubangroupTask)
+	Store.Add(doubanbook.DoubanBookTask)
+	Store.AddJSTask(doubangroup.DoubangroupJSTask)
 }
+
 func (c *CrawlerStore) Add(task *collect.Task) {
-	c.hash[task.Name] = task
+	c.Hash[task.Name] = task
 	c.list = append(c.list, task)
 }
 
-type mystruct struct {
-	Name string
-	Age  int
-}
-
+// 用于动态规则添加请求。
 func AddJsReqs(jreqs []map[string]interface{}) []*collect.Request {
 	reqs := make([]*collect.Request, 0)
 
@@ -39,10 +39,11 @@ func AddJsReqs(jreqs []map[string]interface{}) []*collect.Request {
 	}
 	return reqs
 }
+
+// 用于动态规则添加请求。
 func AddJsReq(jreq map[string]interface{}) []*collect.Request {
 	reqs := make([]*collect.Request, 0)
 	req := &collect.Request{}
-
 	u, ok := jreq["Url"].(string)
 	if !ok {
 		return nil
@@ -59,6 +60,7 @@ func (c *CrawlerStore) AddJSTask(m *collect.TaskModel) {
 	task := &collect.Task{
 		Property: m.Property,
 	}
+
 	task.Rule.Root = func() ([]*collect.Request, error) {
 		vm := otto.New()
 		vm.Set("AddJsReq", AddJsReqs)
@@ -72,21 +74,21 @@ func (c *CrawlerStore) AddJSTask(m *collect.TaskModel) {
 		}
 		return e.([]*collect.Request), nil
 	}
+
 	for _, r := range m.Rules {
-		parseFunc := func(parse string) func(ctx *collect.Context) (collect.ParseResult, error) {
+		paesrFunc := func(parse string) func(ctx *collect.Context) (collect.ParseResult, error) {
 			return func(ctx *collect.Context) (collect.ParseResult, error) {
 				vm := otto.New()
 				vm.Set("ctx", ctx)
 				v, err := vm.Eval(parse)
 				if err != nil {
-					return collect.ParseResult{}, nil
+					return collect.ParseResult{}, err
 				}
 				e, err := v.Export()
 				if err != nil {
 					return collect.ParseResult{}, err
 				}
-				e, err = v.Export()
-				if err != nil {
+				if e == nil {
 					return collect.ParseResult{}, err
 				}
 				return e.(collect.ParseResult), err
@@ -96,29 +98,37 @@ func (c *CrawlerStore) AddJSTask(m *collect.TaskModel) {
 			task.Rule.Trunk = make(map[string]*collect.Rule, 0)
 		}
 		task.Rule.Trunk[r.Name] = &collect.Rule{
-			parseFunc,
+			ParseFunc: paesrFunc,
 		}
 	}
-	c.hash[task.Name] = task
+
+	c.Hash[task.Name] = task
 	c.list = append(c.list, task)
 }
 
+// 全局爬虫任务实例
 var Store = &CrawlerStore{
 	list: []*collect.Task{},
-	hash: map[string]*collect.Task{},
+	Hash: map[string]*collect.Task{},
+}
+
+func GetField(taskName string, ruleName string) []string {
+	return Store.Hash[taskName].Rule.Trunk[ruleName].ItemFields
 }
 
 type CrawlerStore struct {
 	list []*collect.Task
-	hash map[string]*collect.Task
+	Hash map[string]*collect.Task
 }
 
 type Crawler struct {
 	out         chan collect.ParseResult
 	Visited     map[string]bool
 	VisitedLock sync.Mutex
-	failures    map[string]*collect.Request
+
+	failures    map[string]*collect.Request // 失败请求id -> 失败请求
 	failureLock sync.Mutex
+
 	options
 }
 
@@ -153,10 +163,8 @@ func NewSchedule() *Schedule {
 	s := &Schedule{}
 	requestCh := make(chan *collect.Request)
 	workerCh := make(chan *collect.Request)
-
 	s.requestCh = requestCh
 	s.workerCh = workerCh
-
 	return s
 }
 
@@ -179,11 +187,6 @@ func (s *Schedule) Pull() *collect.Request {
 	return r
 }
 
-func (s *Schedule) Output() *collect.Request {
-	r := <-s.workerCh
-	return r
-}
-
 func (s *Schedule) Schedule() {
 	var req *collect.Request
 	var ch chan *collect.Request
@@ -198,6 +201,7 @@ func (s *Schedule) Schedule() {
 			s.reqQueue = s.reqQueue[1:]
 			ch = s.workerCh
 		}
+
 		select {
 		case r := <-s.requestCh:
 			if r.Priority > 0 {
@@ -215,8 +219,10 @@ func (s *Schedule) Schedule() {
 func (e *Crawler) Schedule() {
 	var reqs []*collect.Request
 	for _, seed := range e.Seeds {
-		task := Store.hash[seed.Name]
+		task := Store.Hash[seed.Name]
 		task.Fetcher = seed.Fetcher
+		task.Storage = seed.Storage
+		task.Logger = e.Logger
 		rootreqs, err := task.Rule.Root()
 		if err != nil {
 			e.Logger.Error("get root failed",
@@ -250,15 +256,7 @@ func (s *Crawler) CreateWork() {
 		}
 		s.StoreVisited(req)
 
-		body, err := s.Fetcher.Get(req)
-		if len(body) < 6000 {
-			s.Logger.Error("can't fetch ",
-				zap.Int("length", len(body)),
-				zap.String("url", req.Url),
-			)
-			s.SetFailure(req)
-			continue
-		}
+		body, err := req.Task.Fetcher.Get(req)
 		if err != nil {
 			s.Logger.Error("can't fetch ",
 				zap.Error(err),
@@ -267,14 +265,25 @@ func (s *Crawler) CreateWork() {
 			s.SetFailure(req)
 			continue
 		}
+
+		if len(body) < 6000 {
+			s.Logger.Error("can't fetch ",
+				zap.Int("length", len(body)),
+				zap.String("url", req.Url),
+			)
+			s.SetFailure(req)
+			continue
+		}
+
 		rule := req.Task.Rule.Trunk[req.RuleName]
+
 		result, err := rule.ParseFunc(&collect.Context{
 			body,
 			req,
 		})
 
 		if err != nil {
-			s.Logger.Error("PanicFunc failed",
+			s.Logger.Error("ParseFunc failed ",
 				zap.Error(err),
 				zap.String("url", req.Url),
 			)
@@ -294,7 +303,12 @@ func (s *Crawler) HandleResult() {
 		select {
 		case result := <-s.out:
 			for _, item := range result.Items {
-				// todo: store
+				switch d := item.(type) {
+				case *collector.DataCell:
+					name := d.GetTaskName()
+					task := Store.Hash[name]
+					task.Storage.Save(d)
+				}
 				s.Logger.Sugar().Info("get result: ", item)
 			}
 		}
@@ -311,6 +325,7 @@ func (e *Crawler) HasVisited(r *collect.Request) bool {
 func (e *Crawler) StoreVisited(reqs ...*collect.Request) {
 	e.VisitedLock.Lock()
 	defer e.VisitedLock.Unlock()
+
 	for _, r := range reqs {
 		unique := r.Unique()
 		e.Visited[unique] = true
@@ -327,9 +342,9 @@ func (e *Crawler) SetFailure(req *collect.Request) {
 	e.failureLock.Lock()
 	defer e.failureLock.Unlock()
 	if _, ok := e.failures[req.Unique()]; !ok {
-		//首次失败时，再重新执行一次
+		// 首次失败时，再重新执行一次
 		e.failures[req.Unique()] = req
 		e.scheduler.Push(req)
 	}
-	//todo:失败2次，加载到失败队列中
+	// todo: 失败2次，加载到失败队列中
 }
