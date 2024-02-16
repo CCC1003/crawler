@@ -4,7 +4,6 @@ import (
 	"crawler/collect"
 	"fmt"
 	"regexp"
-	"time"
 )
 
 const urlListRe = `(https://www.doubangroup.com/group/topic/[0-9a-z]+/)"[^>]*>([^<]+)</a>`
@@ -15,7 +14,7 @@ var cookie = "bid=znKnt-7lWzE; _ga=GA1.1.1024234719.1704808192; _ga_RXNMP372GL=G
 var DoubangroupTask = &collect.Task{
 	Property: collect.Property{
 		Name:     "find_douban_sun_room",
-		WaitTime: 1 * time.Second,
+		WaitTime: 2,
 		MaxDepth: 5,
 		Cookie:   cookie,
 	},

@@ -2,22 +2,28 @@ package main
 
 import (
 	"crawler/collect"
-	"crawler/collector"
-	"crawler/collector/sqlstorage"
 	"crawler/engine"
+	"crawler/limiter"
 	"crawler/log"
 	"crawler/proxy"
+	"crawler/storage"
+	"crawler/storage/sqlstorage"
+	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
+	"golang.org/x/time/rate"
 	"time"
 )
 
 func main() {
 	//log
-	plugin := log.NewStdoutPlugin(zapcore.InfoLevel)
+	plugin := log.NewStdoutPlugin(zapcore.DebugLevel)
 	logger := log.NewLogger(plugin)
 	logger.Info("log init")
 
+	zap.ReplaceGlobals(logger)
+
 	//proxy
+	//proxyURLs := []string{"http://221.231.13.198:1080", "http://47.106.120.76:8080", "http://122.116.150.2:9000"}
 	proxyURLs := []string{"http://127.0.0.1:7890"}
 	p, err := proxy.RoundRobinProxySwitcher(proxyURLs...)
 	if err != nil {
@@ -31,7 +37,7 @@ func main() {
 		Proxy:   p,
 	}
 
-	var storage collector.Storage
+	var storage storage.Storage
 	storage, err = sqlstorage.New(
 		sqlstorage.WithSqlUrl("root:123456@tcp(47.92.241.189:3306)/crawler?charset=utf8"),
 		sqlstorage.WithLogger(logger.Named("sqlDB")),
@@ -41,6 +47,14 @@ func main() {
 		logger.Error("create sqlStorage failed")
 		return
 	}
+
+	//2秒1个
+	secondLimit := rate.NewLimiter(limiter.Per(1, 2*time.Second), 1)
+	//60秒20个
+	minuteLimit := rate.NewLimiter(limiter.Per(20, 1*time.Minute), 20)
+
+	multiLimiter := limiter.MultiLimiter(secondLimit, minuteLimit)
+
 	seeds := make([]*collect.Task, 0, 1000)
 	seeds = append(seeds, &collect.Task{
 		Property: collect.Property{
@@ -48,6 +62,7 @@ func main() {
 		},
 		Fetcher: f,
 		Storage: storage,
+		Limit:   multiLimiter,
 	})
 
 	s := engine.NewEngine(

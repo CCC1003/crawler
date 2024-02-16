@@ -13,5 +13,6 @@ require (
 
 require (
 	go.uber.org/multierr v1.10.0 // indirect
+	golang.org/x/time v0.5.0 // indirect
 	gopkg.in/sourcemap.v1 v1.0.5 // indirect
 )

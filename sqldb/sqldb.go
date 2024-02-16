@@ -30,10 +30,6 @@ type Sqldb struct {
 	db *sql.DB
 }
 
-func newSqldb() *Sqldb {
-	return &Sqldb{}
-}
-
 func New(opts ...Option) (*Sqldb, error) {
 	options := defaultOptions
 	for _, opt := range opts {

@@ -1,23 +1,26 @@
 package collect
 
 import (
-	"crawler/collector"
+	"context"
+	"crawler/limiter"
+	"crawler/storage"
 	"crypto/md5"
 	"encoding/hex"
 	"errors"
 	"go.uber.org/zap"
+	"math/rand"
 	"regexp"
 	"sync"
 	"time"
 )
 
 type Property struct {
-	Name     string        `json:"name"`
-	Url      string        `json:"url"`
-	Cookie   string        `json:"cookie"`
-	WaitTime time.Duration `json:"wait_time"`
-	Reload   bool          `json:"reload"`
-	MaxDepth int64         `json:"max_depth"`
+	Name     string `json:"name"`
+	Url      string `json:"url"`
+	Cookie   string `json:"cookie"`
+	WaitTime int64  `json:"wait_time"` //随机休眠秒
+	Reload   bool   `json:"reload"`
+	MaxDepth int64  `json:"max_depth"`
 }
 
 type Task struct {
@@ -25,9 +28,10 @@ type Task struct {
 	Visited     map[string]bool
 	VisitedLock sync.Mutex
 	Fetcher     Fetcher
-	Storage     collector.Storage
+	Storage     storage.Storage
 	Rule        RuleTree
 	Logger      *zap.Logger
+	Limit       limiter.RateLimiter
 }
 
 type Context struct {
@@ -39,8 +43,8 @@ func (c *Context) GetRule(ruleName string) *Rule {
 	return c.Req.Task.Rule.Trunk[ruleName]
 }
 
-func (c *Context) Output(data interface{}) *collector.DataCell {
-	res := &collector.DataCell{}
+func (c *Context) Output(data interface{}) *storage.DataCell {
+	res := &storage.DataCell{}
 	res.Data = make(map[string]interface{})
 	res.Data["Task"] = c.Req.Task.Name
 	res.Data["Rule"] = c.Req.RuleName
@@ -97,6 +101,17 @@ type Request struct {
 type ParseResult struct {
 	Requests []*Request
 	Items    []interface{}
+}
+
+func (r *Request) Fetch() ([]byte, error) {
+	if err := r.Task.Limit.Wait(context.Background()); err != nil {
+		return nil, err
+	}
+
+	//随机休眠，模拟人类行为
+	sleeptime := rand.Int63n(r.Task.WaitTime * 1000)
+	time.Sleep(time.Duration(sleeptime) * time.Millisecond)
+	return r.Task.Fetcher.Get(r)
 }
 
 func (r *Request) Check() error {
